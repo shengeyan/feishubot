@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 
 import { loadConfig, type AppConfig } from './config.js';
@@ -217,6 +217,9 @@ async function handleAuthorizedCommand(
         `${describeRepoAccessPolicy()}\n\n我能识别到的项目：\n${formatKnownProjects(DEFAULT_WORKSPACE_DIR)}`
       );
       return;
+    case 'clear':
+      await clearFinishedTaskRecords(command.message, context);
+      return;
     case 'status':
       await context.sendText(
         command.message.chatId,
@@ -326,10 +329,10 @@ async function createAndEnqueueTask(
       command.prompt,
       '',
       '确认执行：',
-      `/codex approve ${task.id}`,
+      `/approve ${task.id}`,
       '',
       '拒绝执行：',
-      `/codex reject ${task.id}`
+      `/reject ${task.id}`
     ].join('\n')
   );
 }
@@ -367,11 +370,53 @@ async function createPendingProjectTask(
       input.prompt,
       '',
       '确认执行：',
-      `/codex approve ${task.id}`,
+      `/approve ${task.id}`,
       '',
       '拒绝执行：',
-      `/codex reject ${task.id}`
+      `/reject ${task.id}`
     ].join('\n')
+  );
+}
+
+async function clearFinishedTaskRecords(
+  message: FeishuTextMessage,
+  context: {
+    config: AppConfig;
+    store: TaskStore;
+    sendText: (chatId: string, text: string) => Promise<void>;
+  }
+): Promise<void> {
+  const result = context.store.clearFinishedTasks();
+  let deletedLogDirCount = 0;
+  const failedLogDirs: string[] = [];
+
+  for (const taskId of result.taskIds) {
+    const logsDir = path.join(context.config.dataDir, 'logs', taskId);
+
+    if (!existsSync(logsDir)) {
+      continue;
+    }
+
+    try {
+      rmSync(logsDir, { recursive: true, force: true });
+      deletedLogDirCount += 1;
+    } catch (error) {
+      failedLogDirs.push(
+        `${logsDir}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  await context.sendText(
+    message.chatId,
+    formatClearResult({
+      deletedTaskCount: result.deletedTaskCount,
+      deletedEventCount: result.deletedEventCount,
+      deletedArtifactCount: result.deletedArtifactCount,
+      deletedLogDirCount,
+      preservedActiveTaskCount: result.preservedActiveTaskCount,
+      failedLogDirs
+    })
   );
 }
 
@@ -461,6 +506,33 @@ function formatTaskStatus(task: TaskRecord | null, taskId: string): string {
     `结束时间：${task.finishedAt ?? '-'}`,
     `错误：${task.errorMessage ?? '-'}`
   ].join('\n');
+}
+
+function formatClearResult(input: {
+  deletedTaskCount: number;
+  deletedEventCount: number;
+  deletedArtifactCount: number;
+  deletedLogDirCount: number;
+  preservedActiveTaskCount: number;
+  failedLogDirs: string[];
+}): string {
+  const lines = [
+    '已清空已结束任务记录。',
+    `任务记录：${input.deletedTaskCount}`,
+    `事件记录：${input.deletedEventCount}`,
+    `产物记录：${input.deletedArtifactCount}`,
+    `日志目录：${input.deletedLogDirCount}`
+  ];
+
+  if (input.preservedActiveTaskCount > 0) {
+    lines.push(`保留未结束任务：${input.preservedActiveTaskCount}`);
+  }
+
+  if (input.failedLogDirs.length > 0) {
+    lines.push('', '以下日志目录删除失败：', ...input.failedLogDirs.slice(0, 3));
+  }
+
+  return lines.join('\n');
 }
 
 function truncateFeishuMessage(text: string): string {

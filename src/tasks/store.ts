@@ -15,6 +15,15 @@ import type {
 
 type SqlRow = Record<string, SQLOutputValue>;
 
+export type ClearFinishedTasksResult = {
+  taskIds: string[];
+  artifactPaths: string[];
+  deletedTaskCount: number;
+  deletedEventCount: number;
+  deletedArtifactCount: number;
+  preservedActiveTaskCount: number;
+};
+
 export class TaskStore {
   readonly dbPath: string;
 
@@ -240,6 +249,92 @@ export class TaskStore {
       .map(mapTaskRow);
   }
 
+  clearFinishedTasks(): ClearFinishedTasksResult {
+    const taskIds = this.db
+      .prepare(
+        `
+        SELECT id
+        FROM tasks
+        WHERE status IN ('succeeded', 'failed', 'cancelled')
+      `
+      )
+      .all()
+      .map((row) => asString(row.id));
+    const preservedActiveTaskCount = asNumber(
+      this.db
+        .prepare(
+          `
+          SELECT COUNT(*) AS count
+          FROM tasks
+          WHERE status IN ('pending_confirmation', 'queued', 'running')
+        `
+        )
+        .get()?.count
+    );
+
+    if (taskIds.length === 0) {
+      return {
+        taskIds: [],
+        artifactPaths: [],
+        deletedTaskCount: 0,
+        deletedEventCount: 0,
+        deletedArtifactCount: 0,
+        preservedActiveTaskCount
+      };
+    }
+
+    const placeholders = taskIds.map(() => '?').join(', ');
+    const artifactPaths = this.db
+      .prepare(
+        `
+        SELECT path
+        FROM task_artifacts
+        WHERE task_id IN (${placeholders})
+      `
+      )
+      .all(...taskIds)
+      .map((row) => asString(row.path));
+    const deletedEventCount = asNumber(
+      this.db
+        .prepare(
+          `
+          SELECT COUNT(*) AS count
+          FROM task_events
+          WHERE task_id IN (${placeholders})
+        `
+        )
+        .get(...taskIds)?.count
+    );
+    const deletedArtifactCount = artifactPaths.length;
+
+    this.db.exec('BEGIN IMMEDIATE');
+
+    try {
+      this.db
+        .prepare(`DELETE FROM task_artifacts WHERE task_id IN (${placeholders})`)
+        .run(...taskIds);
+      this.db
+        .prepare(`DELETE FROM task_events WHERE task_id IN (${placeholders})`)
+        .run(...taskIds);
+      this.db
+        .prepare(`DELETE FROM tasks WHERE id IN (${placeholders})`)
+        .run(...taskIds);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+
+    return {
+      taskIds,
+      artifactPaths,
+      deletedTaskCount: taskIds.length,
+      deletedEventCount,
+      deletedArtifactCount,
+      preservedActiveTaskCount
+    };
+  }
+
   close(): void {
     this.db.close();
   }
@@ -333,6 +428,18 @@ function asNullableString(value: SQLOutputValue | undefined): string | null {
   }
 
   return asString(value);
+}
+
+function asNumber(value: SQLOutputValue | undefined): number {
+  if (typeof value === 'number') {
+    return value;
+  }
+
+  if (typeof value === 'bigint') {
+    return Number(value);
+  }
+
+  throw new Error(`Expected SQLite number, got ${String(value)}`);
 }
 
 function asTaskStatus(value: SQLOutputValue | undefined): TaskStatus {

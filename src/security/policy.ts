@@ -29,7 +29,7 @@ export function describeRepoAccessPolicy(): string {
   return [
     '当前没有仓库路径白名单。',
     '任意存在的本机目录都可以作为 repo 提交，但 Agent 不会立即执行。',
-    '每个任务都会先进入 pending_confirmation，必须回复 /codex approve <taskId> 后才会运行。'
+    '每个任务都会先进入 pending_confirmation，必须回复 /approve <taskId> 后才会运行。'
   ].join('\n');
 }
 

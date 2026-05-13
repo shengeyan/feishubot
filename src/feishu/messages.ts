@@ -22,6 +22,13 @@ type RawFeishuMessageEvent = {
 export const CODEX_COMMAND_PREFIX = '/codex';
 export const CODEX_COMMAND_ALIAS = 'codex';
 
+const MENU_TEXT_COMMAND_ALIASES = new Map<string, string>([
+  ['帮助', '/help'],
+  ['项目列表', '/repos'],
+  ['仓库列表', '/repos'],
+  ['清空记录', '/clear']
+]);
+
 export function extractTextMessage(
   event: RawFeishuMessageEvent
 ): FeishuTextMessage | null {
@@ -56,11 +63,11 @@ export function parseCodexCommand(
 ): ParsedCodexCommand {
   const text = normalizeCommandText(message.text);
 
-  if (!isCodexCommandText(text)) {
+  const args = getCommandArgs(text);
+
+  if (args === null) {
     return { type: 'ignore', reason: 'not a codex command' };
   }
-
-  const args = stripCodexCommandPrefix(text);
 
   if (!args || args === 'help') {
     return { type: 'help', message };
@@ -68,32 +75,40 @@ export function parseCodexCommand(
 
   const [verb, secondArg] = args.split(/\s+/, 2);
 
+  if (verb === 'help') {
+    return { type: 'help', message };
+  }
+
   if (verb === 'repos') {
     return { type: 'repos', message };
+  }
+
+  if (verb === 'clear') {
+    return { type: 'clear', message };
   }
 
   if (verb === 'status') {
     return secondArg
       ? { type: 'status', message, taskId: secondArg }
-      : { type: 'invalid', message, reason: '缺少 taskId，格式：/codex status <taskId>' };
+      : { type: 'invalid', message, reason: '缺少 taskId，格式：/status <taskId>' };
   }
 
   if (verb === 'approve') {
     return secondArg
       ? { type: 'approve', message, taskId: secondArg }
-      : { type: 'invalid', message, reason: '缺少 taskId，格式：/codex approve <taskId>' };
+      : { type: 'invalid', message, reason: '缺少 taskId，格式：/approve <taskId>' };
   }
 
   if (verb === 'reject') {
     return secondArg
       ? { type: 'reject', message, taskId: secondArg }
-      : { type: 'invalid', message, reason: '缺少 taskId，格式：/codex reject <taskId>' };
+      : { type: 'invalid', message, reason: '缺少 taskId，格式：/reject <taskId>' };
   }
 
   if (verb === 'cancel') {
     return secondArg
       ? { type: 'cancel', message, taskId: secondArg }
-      : { type: 'invalid', message, reason: '缺少 taskId，格式：/codex cancel <taskId>' };
+      : { type: 'invalid', message, reason: '缺少 taskId，格式：/cancel <taskId>' };
   }
 
   const repoToken = findRepoToken(args);
@@ -102,7 +117,7 @@ export function parseCodexCommand(
     return {
       type: 'invalid',
       message,
-      reason: '缺少 repo 参数，格式：/codex repo=<本机目录路径> <任务描述>'
+      reason: '缺少 repo 参数，格式：/repo=<本机目录路径> <任务描述>'
     };
   }
 
@@ -114,7 +129,7 @@ export function parseCodexCommand(
     return {
       type: 'invalid',
       message,
-      reason: '缺少任务描述，格式：/codex repo=<本机目录路径> <任务描述>'
+      reason: '缺少任务描述，格式：/repo=<本机目录路径> <任务描述>'
     };
   }
 
@@ -134,15 +149,18 @@ export function formatHelpText(): string {
     '请检查 /Users/hero/Documents/workspace/heroverse 里的权限问题',
     '',
     '也可以使用命令：',
-    '/codex help',
-    '/codex repos',
-    '/codex status <taskId>',
-    '/codex approve <taskId>',
-    '/codex reject <taskId>',
-    '/codex cancel <taskId>',
-    '/codex repo=<本机目录路径> <任务描述>',
+    '/help',
+    '/repos',
+    '/clear',
+    '/status <taskId>',
+    '/approve <taskId>',
+    '/reject <taskId>',
+    '/cancel <taskId>',
+    '/repo=<本机目录路径> <任务描述>',
     '',
-    '涉及项目修改时会先等待确认，回复 approve 后才会执行。'
+    '飞书菜单名称也可以直接填：帮助、项目列表、清空记录。',
+    '',
+    '涉及项目修改时会先等待确认，回复 /approve 后才会执行。'
   ].join('\n');
 }
 
@@ -162,7 +180,18 @@ function normalizeCommandText(text: string): string {
     .replace(/^／/u, '/')
     .trim();
 
-  if (normalized.toLowerCase().startsWith(CODEX_COMMAND_ALIAS)) {
+  const menuAlias = MENU_TEXT_COMMAND_ALIASES.get(normalized);
+
+  if (menuAlias) {
+    return menuAlias;
+  }
+
+  const lowerNormalized = normalized.toLowerCase();
+
+  if (
+    lowerNormalized === CODEX_COMMAND_ALIAS ||
+    lowerNormalized.startsWith(`${CODEX_COMMAND_ALIAS} `)
+  ) {
     return `${CODEX_COMMAND_PREFIX}${normalized.slice(CODEX_COMMAND_ALIAS.length)}`;
   }
 
@@ -173,8 +202,16 @@ function isCodexCommandText(text: string): boolean {
   return text === CODEX_COMMAND_PREFIX || text.startsWith(`${CODEX_COMMAND_PREFIX} `);
 }
 
-function stripCodexCommandPrefix(text: string): string {
-  return text.slice(CODEX_COMMAND_PREFIX.length).trim();
+function getCommandArgs(text: string): string | null {
+  if (isCodexCommandText(text)) {
+    return text.slice(CODEX_COMMAND_PREFIX.length).trim();
+  }
+
+  if (text.startsWith('/')) {
+    return text.slice(1).trim();
+  }
+
+  return null;
 }
 
 function findRepoToken(
