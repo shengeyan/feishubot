@@ -73,7 +73,10 @@ export function parseCodexCommand(
     return { type: 'help', message };
   }
 
-  const [verb, secondArg] = args.split(/\s+/, 2);
+  const [rawVerb, ...restArgs] = args.split(/\s+/u);
+  const verb = rawVerb ?? '';
+  const secondArg = restArgs[0];
+  const verbRemainder = args.slice(verb.length).trim();
 
   if (verb === 'help') {
     return { type: 'help', message };
@@ -109,6 +112,51 @@ export function parseCodexCommand(
     return secondArg
       ? { type: 'cancel', message, taskId: secondArg }
       : { type: 'invalid', message, reason: '缺少 taskId，格式：/cancel <taskId>' };
+  }
+
+  if (verb === 'stop' || verb === 'interrupt' || verb === '中断') {
+    return secondArg
+      ? { type: 'stop', message, taskId: secondArg }
+      : { type: 'invalid', message, reason: '缺少 taskId，格式：/stop <taskId>' };
+  }
+
+  if (
+    verb === 'file' ||
+    verb === 'artifact' ||
+    verb === '文件' ||
+    verb === '发文件'
+  ) {
+    return secondArg
+      ? {
+          type: 'file',
+          message,
+          taskId: secondArg,
+          artifact: restArgs[1]
+        }
+      : {
+          type: 'invalid',
+          message,
+          reason:
+            '缺少 taskId，格式：/file <taskId> [summary|diff|stat|jsonl|stderr]'
+        };
+  }
+
+  if (
+    verb === 'sendfile' ||
+    verb === 'send-file' ||
+    verb === 'localfile' ||
+    verb === '发本机文件' ||
+    verb === '发本地文件'
+  ) {
+    const filePathInput = parseFilePathArgument(verbRemainder);
+
+    return filePathInput
+      ? { type: 'send_file', message, filePathInput }
+      : {
+          type: 'invalid',
+          message,
+          reason: '缺少文件路径，格式：/sendfile <本机文件路径>'
+        };
   }
 
   const repoToken = findRepoToken(args);
@@ -156,7 +204,12 @@ export function formatHelpText(): string {
     '/approve <taskId>',
     '/reject <taskId>',
     '/cancel <taskId>',
+    '/stop <taskId>',
+    '/file <taskId> [summary|diff|stat|jsonl|stderr]',
+    '/sendfile <本机文件路径>',
     '/repo=<本机目录路径> <任务描述>',
+    '',
+    '如果 Codex 回复里提到本机文件，也可以直接说：把这个以文件形式发我。',
     '',
     '飞书菜单名称也可以直接填：帮助、项目列表、清空记录。',
     '',
@@ -236,6 +289,26 @@ function findRepoToken(
     start: match.index + leadingWhitespace,
     end: match.index + fullMatch.length
   };
+}
+
+function parseFilePathArgument(value: string): string | null {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return null;
+  }
+
+  const quote = trimmed[0];
+
+  if (quote === '"' || quote === "'") {
+    const end = trimmed.indexOf(quote, 1);
+
+    if (end > 1) {
+      return trimmed.slice(1, end);
+    }
+  }
+
+  return trimmed.split(/\s+/u)[0] ?? null;
 }
 
 function unquote(value: string): string {

@@ -34,10 +34,11 @@ export class TaskQueue {
     return this.items.length;
   }
 
-  async cancelTask(taskId: string): Promise<{
+  async cancelTask(taskId: string, options: { notify?: boolean } = {}): Promise<{
     cancelled: boolean;
     message: string;
   }> {
+    const notify = options.notify ?? true;
     const queuedIndex = this.items.findIndex((task) => task.id === taskId);
 
     if (queuedIndex >= 0) {
@@ -54,7 +55,9 @@ export class TaskQueue {
         status: 'cancelled',
         errorMessage: '任务在开始前被取消'
       });
-      await this.notifyCancelled(cancelledTask, '任务在开始前被取消');
+      if (notify) {
+        await this.notifyCancelled(cancelledTask, '任务在开始前被取消');
+      }
 
       return {
         cancelled: true,
@@ -76,7 +79,9 @@ export class TaskQueue {
         status: 'cancelled',
         errorMessage: '任务在确认前被取消'
       });
-      await this.notifyCancelled(cancelledTask, '任务在确认前被取消');
+      if (notify) {
+        await this.notifyCancelled(cancelledTask, '任务在确认前被取消');
+      }
 
       return {
         cancelled: true,
@@ -85,19 +90,26 @@ export class TaskQueue {
     }
 
     if (this.activeTaskId === taskId && task.status === 'running') {
+      const interrupted = this.runner.interrupt(
+        taskId,
+        '用户请求中断运行中的 Codex 任务'
+      );
+      const reason = interrupted
+        ? '运行中任务已中断，已向 Codex 子进程发送 SIGTERM'
+        : '运行中任务已标记取消，但没有找到可中断的 Codex 子进程';
       const cancelledTask = this.store.updateTaskStatus(taskId, {
         status: 'cancelled',
-        errorMessage:
-          '运行中任务已标记取消；第一版不会主动终止 Codex 子进程'
+        errorMessage: reason
       });
-      await this.notifyCancelled(
-        cancelledTask,
-        '运行中任务已标记取消；第一版不会主动终止 Codex 子进程'
-      );
+      if (notify) {
+        await this.notifyCancelled(cancelledTask, reason);
+      }
 
       return {
         cancelled: true,
-        message: `运行中的任务已标记取消：${taskId}`
+        message: interrupted
+          ? `运行中的任务已中断：${taskId}`
+          : `运行中的任务已标记取消：${taskId}`
       };
     }
 

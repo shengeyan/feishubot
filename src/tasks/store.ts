@@ -4,13 +4,19 @@ import path from 'node:path';
 import { DatabaseSync, type SQLOutputValue } from 'node:sqlite';
 
 import type {
+  AppendConversationMessageInput,
   ArtifactKind,
+  ConversationContext,
+  ConversationMessageRecord,
+  ConversationRole,
+  ConversationStateRecord,
   CreateTaskInput,
   TaskArtifactRecord,
   TaskEventRecord,
   TaskRecord,
   TaskStatus,
-  UpdateTaskStatusInput
+  UpdateTaskStatusInput,
+  UpsertConversationStateInput
 } from '../types/tasks.js';
 
 type SqlRow = Record<string, SQLOutputValue>;
@@ -22,6 +28,11 @@ export type ClearFinishedTasksResult = {
   deletedEventCount: number;
   deletedArtifactCount: number;
   preservedActiveTaskCount: number;
+};
+
+export type ClearConversationResult = {
+  deletedMessageCount: number;
+  deletedStateCount: number;
 };
 
 export class TaskStore {
@@ -197,6 +208,25 @@ export class TaskStore {
     };
   }
 
+  listTaskArtifacts(taskId: string): TaskArtifactRecord[] {
+    return this.db
+      .prepare(
+        `
+        SELECT
+          id,
+          task_id,
+          kind,
+          path,
+          created_at
+        FROM task_artifacts
+        WHERE task_id = ?
+        ORDER BY created_at ASC, id ASC
+      `
+      )
+      .all(taskId)
+      .map(mapTaskArtifactRow);
+  }
+
   getTask(taskId: string): TaskRecord | null {
     const row = this.db
       .prepare(
@@ -247,6 +277,169 @@ export class TaskStore {
       )
       .all(limit)
       .map(mapTaskRow);
+  }
+
+  appendConversationMessage(
+    input: AppendConversationMessageInput
+  ): ConversationMessageRecord {
+    const createdAt = now();
+    const result = this.db
+      .prepare(
+        `
+        INSERT INTO conversation_messages (
+          chat_id,
+          user_id,
+          role,
+          content,
+          task_id,
+          repo,
+          created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `
+      )
+      .run(
+        input.chatId,
+        input.userId,
+        input.role,
+        input.content,
+        input.taskId ?? null,
+        input.repo ?? null,
+        createdAt
+      );
+
+    return {
+      id: Number(result.lastInsertRowid),
+      chatId: input.chatId,
+      userId: input.userId,
+      role: input.role,
+      content: input.content,
+      taskId: input.taskId ?? null,
+      repo: input.repo ?? null,
+      createdAt
+    };
+  }
+
+  upsertConversationState(
+    input: UpsertConversationStateInput
+  ): ConversationStateRecord {
+    const existing = this.getConversationState(input.chatId, input.userId);
+    const state: ConversationStateRecord = {
+      chatId: input.chatId,
+      userId: input.userId,
+      lastRepo:
+        input.lastRepo === undefined ? existing?.lastRepo ?? null : input.lastRepo,
+      lastProjectName:
+        input.lastProjectName === undefined
+          ? existing?.lastProjectName ?? null
+          : input.lastProjectName,
+      lastTaskId:
+        input.lastTaskId === undefined
+          ? existing?.lastTaskId ?? null
+          : input.lastTaskId,
+      updatedAt: now()
+    };
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO conversation_state (
+          chat_id,
+          user_id,
+          last_repo,
+          last_project_name,
+          last_task_id,
+          updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id, user_id) DO UPDATE SET
+          last_repo = excluded.last_repo,
+          last_project_name = excluded.last_project_name,
+          last_task_id = excluded.last_task_id,
+          updated_at = excluded.updated_at
+      `
+      )
+      .run(
+        state.chatId,
+        state.userId,
+        state.lastRepo,
+        state.lastProjectName,
+        state.lastTaskId,
+        state.updatedAt
+      );
+
+    return state;
+  }
+
+  getConversationContext(
+    chatId: string,
+    userId: string,
+    messageLimit = 8
+  ): ConversationContext {
+    const state = this.getConversationState(chatId, userId);
+    const messages = this.db
+      .prepare(
+        `
+        SELECT
+          id,
+          chat_id,
+          user_id,
+          role,
+          content,
+          task_id,
+          repo,
+          created_at
+        FROM conversation_messages
+        WHERE chat_id = ? AND user_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+      `
+      )
+      .all(chatId, userId, messageLimit)
+      .map(mapConversationMessageRow)
+      .reverse();
+
+    return {
+      state,
+      messages
+    };
+  }
+
+  clearConversation(chatId: string, userId: string): ClearConversationResult {
+    const deletedMessageCount = asNumber(
+      this.db
+        .prepare(
+          `
+          SELECT COUNT(*) AS count
+          FROM conversation_messages
+          WHERE chat_id = ? AND user_id = ?
+        `
+        )
+        .get(chatId, userId)?.count
+    );
+    const deletedStateCount = asNumber(
+      this.db
+        .prepare(
+          `
+          SELECT COUNT(*) AS count
+          FROM conversation_state
+          WHERE chat_id = ? AND user_id = ?
+        `
+        )
+        .get(chatId, userId)?.count
+    );
+
+    this.db
+      .prepare('DELETE FROM conversation_messages WHERE chat_id = ? AND user_id = ?')
+      .run(chatId, userId);
+    this.db
+      .prepare('DELETE FROM conversation_state WHERE chat_id = ? AND user_id = ?')
+      .run(chatId, userId);
+
+    return {
+      deletedMessageCount,
+      deletedStateCount
+    };
   }
 
   clearFinishedTasks(): ClearFinishedTasksResult {
@@ -377,6 +570,27 @@ export class TaskStore {
         FOREIGN KEY (task_id) REFERENCES tasks(id)
       );
 
+      CREATE TABLE IF NOT EXISTS conversation_state (
+        chat_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        last_repo TEXT,
+        last_project_name TEXT,
+        last_task_id TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (chat_id, user_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS conversation_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        task_id TEXT,
+        repo TEXT,
+        created_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_tasks_status_created_at
         ON tasks(status, created_at);
 
@@ -385,7 +599,33 @@ export class TaskStore {
 
       CREATE INDEX IF NOT EXISTS idx_task_artifacts_task_id
         ON task_artifacts(task_id);
+
+      CREATE INDEX IF NOT EXISTS idx_conversation_messages_lookup
+        ON conversation_messages(chat_id, user_id, created_at, id);
     `);
+  }
+
+  private getConversationState(
+    chatId: string,
+    userId: string
+  ): ConversationStateRecord | null {
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          chat_id,
+          user_id,
+          last_repo,
+          last_project_name,
+          last_task_id,
+          updated_at
+        FROM conversation_state
+        WHERE chat_id = ? AND user_id = ?
+      `
+      )
+      .get(chatId, userId);
+
+    return row ? mapConversationStateRow(row) : null;
   }
 }
 
@@ -403,6 +643,40 @@ function mapTaskRow(row: SqlRow): TaskRecord {
     finishedAt: asNullableString(row.finished_at),
     finalSummary: asNullableString(row.final_summary),
     errorMessage: asNullableString(row.error_message)
+  };
+}
+
+function mapTaskArtifactRow(row: SqlRow): TaskArtifactRecord {
+  return {
+    id: asNumber(row.id),
+    taskId: asString(row.task_id),
+    kind: asArtifactKind(row.kind),
+    path: asString(row.path),
+    createdAt: asString(row.created_at)
+  };
+}
+
+function mapConversationMessageRow(row: SqlRow): ConversationMessageRecord {
+  return {
+    id: asNumber(row.id),
+    chatId: asString(row.chat_id),
+    userId: asString(row.user_id),
+    role: asConversationRole(row.role),
+    content: asString(row.content),
+    taskId: asNullableString(row.task_id),
+    repo: asNullableString(row.repo),
+    createdAt: asString(row.created_at)
+  };
+}
+
+function mapConversationStateRow(row: SqlRow): ConversationStateRecord {
+  return {
+    chatId: asString(row.chat_id),
+    userId: asString(row.user_id),
+    lastRepo: asNullableString(row.last_repo),
+    lastProjectName: asNullableString(row.last_project_name),
+    lastTaskId: asNullableString(row.last_task_id),
+    updatedAt: asString(row.updated_at)
   };
 }
 
@@ -457,4 +731,30 @@ function asTaskStatus(value: SQLOutputValue | undefined): TaskStatus {
   }
 
   throw new Error(`Invalid task status: ${status}`);
+}
+
+function asArtifactKind(value: SQLOutputValue | undefined): ArtifactKind {
+  const kind = asString(value);
+
+  if (
+    kind === 'codex_jsonl' ||
+    kind === 'stderr_log' ||
+    kind === 'final_summary' ||
+    kind === 'git_diff' ||
+    kind === 'git_diff_stat'
+  ) {
+    return kind;
+  }
+
+  throw new Error(`Invalid artifact kind: ${kind}`);
+}
+
+function asConversationRole(value: SQLOutputValue | undefined): ConversationRole {
+  const role = asString(value);
+
+  if (role === 'user' || role === 'assistant') {
+    return role;
+  }
+
+  throw new Error(`Invalid conversation role: ${role}`);
 }

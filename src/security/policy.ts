@@ -25,6 +25,23 @@ export function resolveRepoPath(input: string): string {
   return realRepoPath;
 }
 
+export function resolveLocalFilePath(input: string): string {
+  const filePath = expandHome(input.trim());
+  const absoluteFilePath = path.resolve(filePath);
+
+  if (!existsSync(absoluteFilePath)) {
+    throw new Error(`文件不存在：${absoluteFilePath}`);
+  }
+
+  const realFilePath = realpathSync.native(absoluteFilePath);
+
+  if (!statSync(realFilePath).isFile()) {
+    throw new Error(`路径不是普通文件：${realFilePath}`);
+  }
+
+  return realFilePath;
+}
+
 export function describeRepoAccessPolicy(): string {
   return [
     '当前没有仓库路径白名单。',

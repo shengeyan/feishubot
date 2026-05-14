@@ -1,4 +1,4 @@
-import { spawn, execFile } from 'node:child_process';
+import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -15,11 +15,37 @@ import type { TaskRecord } from '../types/tasks.js';
 
 const execFileAsync = promisify(execFile);
 
+type RunningCodexProcess = {
+  child: ChildProcess;
+  forceKillTimer: NodeJS.Timeout | null;
+};
+
 export class CodexRunner {
+  private readonly runningProcesses = new Map<string, RunningCodexProcess>();
+
   constructor(
     private readonly config: AppConfig,
     private readonly store: TaskStore
   ) {}
+
+  interrupt(taskId: string, reason: string): boolean {
+    const runningProcess = this.runningProcesses.get(taskId);
+
+    if (!runningProcess || runningProcess.child.killed) {
+      return false;
+    }
+
+    this.store.appendTaskEvent(taskId, 'codex.interrupt', reason);
+    const signalled = runningProcess.child.kill('SIGTERM');
+
+    if (signalled && !runningProcess.forceKillTimer) {
+      runningProcess.forceKillTimer = setTimeout(() => {
+        runningProcess.child.kill('SIGKILL');
+      }, 5_000);
+    }
+
+    return signalled;
+  }
 
   async run(task: TaskRecord): Promise<CodexRunResult> {
     const logsDir = path.join(this.config.dataDir, 'logs', task.id);
@@ -120,7 +146,11 @@ export class CodexRunner {
     });
     let stderr = '';
     let timedOut = false;
-    let forceKillTimer: NodeJS.Timeout | null = null;
+    const runningProcess: RunningCodexProcess = {
+      child,
+      forceKillTimer: null
+    };
+    this.runningProcesses.set(input.task.id, runningProcess);
 
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -130,7 +160,12 @@ export class CodexRunner {
         `Codex 超过 ${this.config.taskTimeoutMs}ms，发送 SIGTERM`
       );
       child.kill('SIGTERM');
-      forceKillTimer = setTimeout(() => child.kill('SIGKILL'), 5_000);
+      if (!runningProcess.forceKillTimer) {
+        runningProcess.forceKillTimer = setTimeout(
+          () => child.kill('SIGKILL'),
+          5_000
+        );
+      }
     }, this.config.taskTimeoutMs);
 
     child.stdout?.on('data', (chunk: Buffer) => {
@@ -174,10 +209,11 @@ export class CodexRunner {
     } finally {
       clearTimeout(timeout);
 
-      if (forceKillTimer) {
-        clearTimeout(forceKillTimer);
+      if (runningProcess.forceKillTimer) {
+        clearTimeout(runningProcess.forceKillTimer);
       }
 
+      this.runningProcesses.delete(input.task.id);
       await endStream(input.stdoutStream);
       await endStream(input.stderrStream);
     }

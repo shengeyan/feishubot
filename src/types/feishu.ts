@@ -15,6 +15,9 @@ export type ParsedCodexCommand =
   | { type: 'approve'; message: FeishuTextMessage; taskId: string }
   | { type: 'reject'; message: FeishuTextMessage; taskId: string }
   | { type: 'cancel'; message: FeishuTextMessage; taskId: string }
+  | { type: 'stop'; message: FeishuTextMessage; taskId: string }
+  | { type: 'file'; message: FeishuTextMessage; taskId: string; artifact?: string }
+  | { type: 'send_file'; message: FeishuTextMessage; filePathInput: string }
   | {
       type: 'task';
       message: FeishuTextMessage;

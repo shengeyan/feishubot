@@ -10,7 +10,8 @@
 - 本机已安装并登录 Codex CLI，且 `codex exec --help` 可正常运行。
 - 飞书自建应用已开启机器人能力。
 - 飞书开放平台已开启事件订阅、长连接模式、接收消息事件 `im.message.receive_v1`。
-- 飞书应用具备发送消息权限，机器人已加入目标会话。
+- 如需使用任务卡片按钮，需开启消息卡片回调 `card.action.trigger`。
+- 飞书应用具备发送消息、上传文件权限，机器人已加入目标会话。
 
 ## 配置
 
@@ -59,6 +60,8 @@ npm run start
 
 普通聊天会直接交给 Codex 回复。消息里出现当前 workspace 下的项目名，或出现本机绝对路径时，会创建待确认项目任务。直接写绝对路径时不受项目名识别目录限制。
 
+机器人会按飞书 `chatId + userId` 保存短期会话记忆：最近项目、最近任务和最近几轮用户/Codex 消息。后续消息里出现「继续」「刚才」「这个」「文件」「README」这类上下文追问时，会沿用上一轮项目并把近期上下文一起交给 Codex，例如「请把 xxx 项目的 README 给我」之后再说「请以文件形式给我」，会继续指向 `xxx` 项目。
+
 也可以使用命令：
 
 ```text
@@ -69,6 +72,9 @@ npm run start
 /approve <taskId>
 /reject <taskId>
 /cancel <taskId>
+/stop <taskId>
+/file <taskId> [summary|diff|stat|jsonl|stderr]
+/sendfile <本机文件路径>
 /repo=<本机目录路径> <任务描述>
 ```
 
@@ -81,7 +87,7 @@ npm run start
 /repo=~/Documents/workspace/heroverse 检查项目结构并总结
 ```
 
-发送任务后，机器人会回复一个 `pending_confirmation` 任务 ID。确认执行：
+发送任务后，机器人会回复一张待确认卡片，可以直接点「确认执行」或「拒绝执行」。也可以手动回复：
 
 ```text
 /approve <taskId>
@@ -95,7 +101,28 @@ npm run start
 
 `/repos` 会说明当前路径策略：没有路径白名单，所有存在目录都可提交，但需要确认。
 
-`/clear` 会清空已结束任务的数据库记录和对应日志目录；正在等待确认、排队或运行中的任务会保留。
+`/clear` 会清空已结束任务的数据库记录和对应日志目录，并清空当前飞书会话下当前用户的短期记忆；正在等待确认、排队或运行中的任务会保留。
+
+`/stop <taskId>` 会取消未开始任务；如果任务正在运行，会向 Codex 子进程发送 `SIGTERM`，必要时数秒后强制结束。运行中任务卡片也会提供「中断任务」按钮。
+
+`/file <taskId>` 会把任务回执文件 `final.txt` 上传并发送到当前飞书会话。也可以指定产物：
+
+```text
+/file <taskId> summary
+/file <taskId> diff
+/file <taskId> stat
+/file <taskId> jsonl
+/file <taskId> stderr
+```
+
+如果上一轮任务已经生成产物，直接说「把上次结果以文件形式发我」「把 diff 发我」也会尝试发送对应文件。若 Codex 回复里包含本机文件链接，或上下文能定位到当前项目的 README，也可以直接说「把这个以文件形式发我」「把 README 文件发我」，机器人会优先上传真实项目文件。飞书即时消息文件上传限制为 30MB，空文件不会发送。
+
+`/sendfile <本机文件路径>` 可以发送白名单用户明确指定的本机文件，例如：
+
+```text
+/sendfile /Users/hero/Documents/report.pdf
+/sendfile "/Users/hero/Documents/file with spaces.txt"
+```
 
 ## 数据与日志
 
@@ -104,6 +131,8 @@ npm run start
 ```text
 data/agent.sqlite
 ```
+
+其中 `conversation_state` 保存每个会话/用户的最近项目和任务，`conversation_messages` 保存短期上下文消息。
 
 每个任务的本地日志目录：
 
@@ -124,9 +153,9 @@ data/logs/<taskId>/
 - 只有 `FEISHU_ALLOWED_USER_IDS` 中的用户可以创建、查询、取消任务。
 - 不配置路径白名单；任意存在目录都可作为 `repo`，但任务必须先由白名单用户显式 approve。
 - Codex 执行参数固定使用 `-s danger-full-access --skip-git-repo-check`，允许访问本机路径。
-- 回发飞书只发送摘要和本地日志路径，不发送完整 diff。
+- 默认回发飞书只发送摘要和本地日志路径；白名单用户可用 `/file` 将指定任务产物作为飞书文件发送，也可用 `/sendfile` 发送明确指定的本机文件。
 - 任务全局 FIFO 串行执行，避免多个 Codex 任务同时修改同一工作区。
-- `/cancel` 对未开始任务会直接取消；对运行中任务第一版只标记取消，不主动终止 Codex 子进程。
+- `/cancel` 和 `/stop` 对未开始任务会直接取消；对运行中任务会尝试终止 Codex 子进程。
 
 ## 验证清单
 
@@ -136,5 +165,8 @@ data/logs/<taskId>/
 4. 使用非白名单用户发送命令，确认被拒绝。
 5. 使用不存在的目录发送命令，确认被拒绝。
 6. 使用存在目录发送只读任务，确认任务停在 `pending_confirmation`。
-7. 回复 `/approve <taskId>`，确认任务开始执行并生成记录、JSONL 和飞书回执。
-8. 使用小改动任务，确认生成 `git-diff.patch` 且不会自动 commit/push。
+7. 点击卡片「确认执行」或回复 `/approve <taskId>`，确认任务开始执行并生成记录、JSONL 和飞书回执。
+8. 点击运行中任务卡片「中断任务」或回复 `/stop <taskId>`，确认任务被取消。
+9. 使用 `/file <taskId> summary`，确认飞书收到 `final.txt` 文件。
+10. 使用 `/sendfile <本机文件路径>`，确认飞书收到指定本机文件。
+11. 使用小改动任务，确认生成 `git-diff.patch` 且不会自动 commit/push。
