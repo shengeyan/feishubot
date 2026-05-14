@@ -24,6 +24,7 @@ export function resolveProjectIntent(
   workspaceDir: string
 ): ProjectIntent {
   const explicitPath = extractExplicitPath(text);
+  const searchRoots = getProjectSearchRoots(workspaceDir);
 
   if (explicitPath) {
     try {
@@ -42,7 +43,7 @@ export function resolveProjectIntent(
     }
   }
 
-  const projects = listProjects([workspaceDir]);
+  const projects = listProjects(searchRoots);
   const lowerText = text.toLowerCase();
   const matchedProject = projects.find((project) =>
     lowerText.includes(project.name.toLowerCase())
@@ -62,7 +63,7 @@ export function resolveProjectIntent(
       type: 'missing',
       reason: [
         '我感觉这是一个项目任务，但没从消息里识别到本机项目。',
-        `当前会从这个目录查找项目：${workspaceDir}`,
+        `当前会从这些目录查找项目：${searchRoots.join('、')}`,
         '你可以直接写项目绝对路径，例如：请处理 /Users/hero/Documents/workspace/heroverse 里的 build 报错'
       ].join('\n')
     };
@@ -72,12 +73,13 @@ export function resolveProjectIntent(
 }
 
 export function formatKnownProjects(workspaceDir: string): string {
-  const projects = listProjects([workspaceDir]);
+  const searchRoots = getProjectSearchRoots(workspaceDir);
+  const projects = listProjects(searchRoots);
 
   if (projects.length === 0) {
     return [
       '当前没有在项目根目录下发现项目。',
-      `项目根目录：${workspaceDir}`
+      `项目查找目录：${searchRoots.join('、')}`
     ].join('\n');
   }
 
@@ -86,9 +88,34 @@ export function formatKnownProjects(workspaceDir: string): string {
     .join('\n');
 }
 
+function getProjectSearchRoots(workspaceDir: string): string[] {
+  const resolvedWorkspaceDir = path.resolve(workspaceDir);
+  const workspaceParentDir = path.dirname(resolvedWorkspaceDir);
+  const homeDir = os.homedir();
+  const candidates = [
+    resolvedWorkspaceDir,
+    workspaceParentDir,
+    path.join(homeDir, 'Documents'),
+    path.join(homeDir, 'Documents', 'workspace'),
+    path.join(homeDir, 'workspace'),
+    path.join(homeDir, 'Projects'),
+    path.join(homeDir, 'projects'),
+    path.join(homeDir, 'Developer'),
+    path.join(homeDir, 'code'),
+    path.join(homeDir, 'repos')
+  ];
+
+  return uniqueStrings(
+    candidates
+      .filter((root) => root !== homeDir && root !== path.parse(root).root)
+      .map((root) => tryRealpathDirectory(root))
+      .filter((root): root is string => Boolean(root))
+  );
+}
+
 function listProjects(roots: string[]): Array<{ name: string; path: string }> {
   const projects = roots.flatMap((root) => {
-    if (!existsSync(root) || !statSync(root).isDirectory()) {
+    if (!isExistingDirectory(root)) {
       return [];
     }
 
@@ -105,6 +132,22 @@ function listProjects(roots: string[]): Array<{ name: string; path: string }> {
 
   return [...new Map(projects.map((project) => [project.path, project])).values()]
     .sort((left, right) => right.name.length - left.name.length);
+}
+
+function tryRealpathDirectory(root: string): string | null {
+  if (!isExistingDirectory(root)) {
+    return null;
+  }
+
+  return realpathSync.native(root);
+}
+
+function isExistingDirectory(root: string): boolean {
+  try {
+    return existsSync(root) && statSync(root).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function extractExplicitPath(text: string): string | null {
@@ -137,4 +180,8 @@ function expandHome(value: string): string {
   }
 
   return value;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
 }
